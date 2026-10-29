@@ -397,3 +397,5 @@ dialog label input[type=range] { flex: 1; }
   .panel { grid-column: 1 / -1; border-left: none; border-top: 1px solid var(--line); }
   kbd { display: none; }
 }
+button.primary.danger { background: var(--danger); border-color: var(--danger); }
+#confirm-text { margin: 0; max-width: 360px; font-size: 13px; }

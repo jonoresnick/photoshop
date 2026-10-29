@@ -179,6 +179,16 @@
     </form>
   </dialog>
 
+  <dialog id="confirm-dialog">
+    <form method="dialog">
+      <p id="confirm-text"></p>
+      <div class="dialog-actions">
+        <button value="cancel" type="submit">Cancel</button>
+        <button value="ok" type="submit" class="primary danger" id="confirm-ok">OK</button>
+      </div>
+    </form>
+  </dialog>
+
   <input type="file" id="file-open" accept=".psd,.psb,image/*" hidden />
   <input type="file" id="file-place" accept="image/*,.psd" hidden />
   <script type="module" src="./src/main.ts"></script>

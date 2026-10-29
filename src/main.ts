@@ -5,6 +5,7 @@ import {
   makeLayer, newDoc, savePsd, walk, type Doc, type Layer,
 } from './doc';
 import { EXACT_BLEND_MODES, flatten, renderDoc } from './render';
+import { zipSingleFile } from './zip';
 
 type Tool = 'move' | 'brush' | 'eraser' | 'bucket' | 'eyedropper' | 'hand';
 
@@ -20,6 +21,12 @@ type PickerWindow = Window & {
 };
 const pickerWin = window as PickerWindow;
 const canUsePickers = !!pickerWin.showOpenFilePicker && window.self === window.top;
+
+// When hosted as a claude.ai artifact, downloads go through the viewer's `downloads` capability,
+// which only accepts certain extensions, so PSDs are delivered inside a .zip there.
+interface HostDownloads { save(r: { filename: string; data: Blob }): Promise<unknown> }
+type HostWindow = Window & { claude?: { use(name: 'downloads'): Promise<HostDownloads | null> } };
+const hostDownloads: Promise<HostDownloads | null> = (window as HostWindow).claude?.use('downloads').catch(() => null) ?? Promise.resolve(null);
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) => document.querySelector(sel) as T;
 
@@ -202,7 +209,7 @@ function setDoc(d: Doc, handle: FileHandle | null = null) {
 const isPsd = (name: string) => /\.(psd|psb)$/i.test(name);
 
 async function openFile(file: File, handle: FileHandle | null = null) {
-  if (dirty && !confirm('Discard unsaved changes to the current document?')) return;
+  if (dirty && !(await askConfirm(`Discard unsaved changes to ${doc!.name}?`, 'Discard'))) return;
   try {
     if (isPsd(file.name)) {
       const buf = await file.arrayBuffer();
@@ -279,7 +286,8 @@ async function cmdSave(): Promise<void> {
 async function cmdSaveAs(): Promise<void> {
   if (!doc) return;
   try {
-    if (canUsePickers && pickerWin.showSaveFilePicker) {
+    const host = await hostDownloads;
+    if (!host && canUsePickers && pickerWin.showSaveFilePicker) {
       let handle: FileHandle;
       try {
         handle = await pickerWin.showSaveFilePicker({
@@ -295,7 +303,16 @@ async function cmdSaveAs(): Promise<void> {
       return cmdSave();
     }
     const data = await encodePsd();
-    download(new Blob([data], { type: 'image/vnd.adobe.photoshop' }), psdName());
+    const blob = new Blob([data], { type: 'image/vnd.adobe.photoshop' });
+    if (host) {
+      const zipName = psdName().replace(/\.psd$/i, '.zip');
+      if (await download(zipSingleFile(psdName(), new Uint8Array(data)), zipName)) {
+        setDirty(false);
+        status(`Saved ${zipName} — unzip it to get ${psdName()}`);
+      }
+      return;
+    }
+    await download(blob, psdName());
     setDirty(false);
     status(`Downloaded ${psdName()}`);
   } catch (err) {
@@ -307,14 +324,26 @@ async function cmdSaveAs(): Promise<void> {
 function cmdExport() {
   if (!doc) return;
   const name = doc.name.replace(/\.[^.]+$/, '') + '.png';
-  flatten(doc).toBlob(b => {
+  flatten(doc).toBlob(async b => {
     if (!b) return status('Export failed', true);
-    download(b, name);
-    status(`Exported ${name}`);
+    if (await download(b, name)) status(`Exported ${name}`);
   }, 'image/png');
 }
 
-function download(blob: Blob, name: string) {
+/** Resolves false if the viewer declined the save. */
+async function download(blob: Blob, name: string): Promise<boolean> {
+  const host = await hostDownloads;
+  if (host) {
+    try {
+      await host.save({ filename: name, data: blob });
+      return true;
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === 'declined') status('Save cancelled');
+      else status(`Couldn’t save ${name}: ${(err as Error).message ?? code}`, true);
+      return false;
+    }
+  }
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = name;
@@ -322,6 +351,16 @@ function download(blob: Blob, name: string) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+  return true;
+}
+
+const confirmDialog = $<HTMLDialogElement>('#confirm-dialog');
+function askConfirm(message: string, okLabel: string): Promise<boolean> {
+  $('#confirm-text').textContent = message;
+  $('#confirm-ok').textContent = okLabel;
+  confirmDialog.returnValue = '';
+  confirmDialog.showModal();
+  return new Promise(resolve => (confirmDialog.onclose = () => resolve(confirmDialog.returnValue === 'ok')));
 }
 
 async function placeFile(file: File) {
@@ -1209,9 +1248,9 @@ const commands: Record<string, () => void> = {
   new: () => {
     const dlg = $<HTMLDialogElement>('#new-dialog');
     dlg.returnValue = '';
-    dlg.onclose = () => {
+    dlg.onclose = async () => {
       if (dlg.returnValue !== 'ok') return;
-      if (dirty && !confirm('Discard unsaved changes to the current document?')) return;
+      if (dirty && !(await askConfirm(`Discard unsaved changes to ${doc!.name}?`, 'Discard'))) return;
       const w = Math.min(30000, Math.max(1, +$<HTMLInputElement>('#new-w').value || 1));
       const h = Math.min(30000, Math.max(1, +$<HTMLInputElement>('#new-h').value || 1));
       setDoc(newDoc(w, h, $<HTMLSelectElement>('#new-bg').value || null));

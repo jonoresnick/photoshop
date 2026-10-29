@@ -1,10 +1,12 @@
 import type { BlendMode } from 'ag-psd';
 import { ADJUSTMENTS } from './adjust';
 import {
-  cloneCanvas, cloneLayers, createCanvas, ctx2d, docFromImage, duplicateLayer, findLayer, loadPsd, makeGroup,
-  makeLayer, newDoc, savePsd, walk, type Doc, type Layer,
+  cloneCanvas, cloneLayers, createCanvas, ctx2d, docFromImage, duplicateLayer, findLayer, layerFromCanvas, loadPsd,
+  makeGroup, makeLayer, newDoc, savePsd, scaled, walk, type Doc, type Layer,
 } from './doc';
-import { EXACT_BLEND_MODES, flatten, renderDoc } from './render';
+import { readFileChunks } from './bigfile';
+import { brushTip, floodFill, type Op } from './pixels';
+import { EXACT_BLEND_MODES, flatten, previewSize, renderDoc } from './render';
 import { zipSingleFile } from './zip';
 
 type Tool = 'move' | 'brush' | 'eraser' | 'bucket' | 'eyedropper' | 'hand';
@@ -13,7 +15,7 @@ type Tool = 'move' | 'brush' | 'eraser' | 'bucket' | 'eyedropper' | 'hand';
 interface FileHandle {
   name: string;
   getFile(): Promise<File>;
-  createWritable(): Promise<{ write(data: Blob | ArrayBuffer): Promise<void>; close(): Promise<void> }>;
+  createWritable(): Promise<{ write(data: Blob | BufferSource): Promise<void>; close(): Promise<void> }>;
 }
 type PickerWindow = Window & {
   showOpenFilePicker?: (o?: object) => Promise<FileHandle[]>;
@@ -110,8 +112,10 @@ function status(msg: string, error = false) {
   msgTimer = window.setTimeout(() => (el.textContent = ''), error ? 8000 : 4000);
 }
 
+const busyText = (text: string) => ($('#busy-text').textContent = text);
+
 async function busy<T>(text: string, fn: () => T | Promise<T>): Promise<T> {
-  $('#busy-text').textContent = text;
+  busyText(text);
   $('#busy').hidden = false;
   // Let the overlay paint before blocking work starts.
   await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
@@ -192,14 +196,18 @@ function toDoc(e: { clientX: number; clientY: number }) {
 function setDoc(d: Doc, handle: FileHandle | null = null) {
   doc = d;
   fileHandle = handle;
-  view.width = d.width;
-  view.height = d.height;
+  const { w, h } = previewSize(d);
+  view.width = w;
+  view.height = h;
   undoStack.length = 0;
   redoStack.length = 0;
   const top = d.layers[d.layers.length - 1];
   selectedId = top?.id ?? null;
   $('#empty').hidden = true;
-  $('#status-size').textContent = `${d.width} × ${d.height}px`;
+  $('#status-size').textContent = `${d.width} × ${d.height}px` + (d.scale < 1 ? ` · previewing at ${Math.round(d.scale * 100)}%` : '');
+  $('#status-size').title = d.scale < 1
+    ? 'This document is too big to show at full resolution, so you see a smaller preview. Edits are applied at full resolution when you save.'
+    : '';
   document.querySelectorAll<HTMLButtonElement>('[data-needs-doc]').forEach(b => (b.disabled = false));
   setDirty(false);
   fitView();
@@ -212,8 +220,10 @@ async function openFile(file: File, handle: FileHandle | null = null) {
   if (dirty && !(await askConfirm(`Discard unsaved changes to ${doc!.name}?`, 'Discard'))) return;
   try {
     if (isPsd(file.name)) {
-      const buf = await file.arrayBuffer();
-      const d = await busy(`Opening ${file.name}…`, () => loadPsd(buf, file.name));
+      const d = await busy(`Opening ${file.name}…`, async () => {
+        const chunks = await readFileChunks(file, f => busyText(`Reading ${file.name}… ${Math.round(f * 100)}%`));
+        return loadPsd(chunks, file.name, busyText);
+      });
       setDoc(d, handle);
       const unsupported = countUnsupported(d);
       status(`Opened ${file.name}` + (unsupported ? ` · ${unsupported}` : ''));
@@ -260,20 +270,31 @@ async function cmdOpen() {
   $<HTMLInputElement>('#file-open').click();
 }
 
-async function encodePsd(): Promise<ArrayBuffer> {
+const MAX_COMPOSITE_PIXELS = 64_000_000;
+
+async function encodePsd(): Promise<{ parts: Uint8Array[]; name: string }> {
   const d = doc!;
-  return busy('Saving PSD…', () => savePsd(d, flatten(d)));
+  return busy('Saving…', async () => {
+    const preview = flatten(d);
+    // The flattened image is only exact when we're working at full resolution; otherwise Photoshop rebuilds it.
+    const composite = d.scale === 1 && d.width * d.height <= MAX_COMPOSITE_PIXELS ? preview : null;
+    const t = Math.min(1, 160 / Math.max(preview.width, preview.height));
+    const thumb = createCanvas(Math.round(preview.width * t), Math.round(preview.height * t));
+    ctx2d(thumb).drawImage(preview, 0, 0, thumb.width, thumb.height);
+    const { parts, psb } = await savePsd(d, composite, thumb, busyText);
+    return { parts, name: d.name.replace(/\.[^.]+$/, '') + (psb ? '.psb' : '.psd') };
+  });
 }
 
-const psdName = () => doc!.name.replace(/\.[^.]+$/, '') + '.psd';
+const psdName = () => doc!.name.replace(/\.[^.]+$/, '') + (/\.psb$/i.test(doc!.name) ? '.psb' : '.psd');
 
 async function cmdSave(): Promise<void> {
   if (!doc) return;
   if (!fileHandle) return cmdSaveAs();
   try {
-    const data = await encodePsd();
+    const { parts } = await encodePsd();
     const w = await fileHandle.createWritable();
-    await w.write(data);
+    await w.write(new Blob(parts as BlobPart[]));
     await w.close();
     setDirty(false);
     status(`Saved ${fileHandle.name}`);
@@ -292,7 +313,7 @@ async function cmdSaveAs(): Promise<void> {
       try {
         handle = await pickerWin.showSaveFilePicker({
           suggestedName: psdName(),
-          types: [{ description: 'Photoshop', accept: { 'image/vnd.adobe.photoshop': ['.psd'] } }],
+          types: [{ description: 'Photoshop', accept: { 'image/vnd.adobe.photoshop': ['.psd', '.psb'] } }],
         });
       } catch (err) {
         if ((err as Error).name === 'AbortError') return;
@@ -302,19 +323,19 @@ async function cmdSaveAs(): Promise<void> {
       doc.name = handle.name;
       return cmdSave();
     }
-    const data = await encodePsd();
-    const blob = new Blob([data], { type: 'image/vnd.adobe.photoshop' });
+    const { parts, name } = await encodePsd();
     if (host) {
-      const zipName = psdName().replace(/\.psd$/i, '.zip');
-      if (await download(zipSingleFile(psdName(), new Uint8Array(data)), zipName)) {
+      const zipName = name.replace(/\.ps[db]$/i, '.zip');
+      const zip = await busy('Packing zip…', () => zipSingleFile(name, parts));
+      if (await download(zip, zipName)) {
         setDirty(false);
-        status(`Saved ${zipName} — unzip it to get ${psdName()}`);
+        status(`Saved ${zipName} — unzip it to get ${name}`);
       }
       return;
     }
-    await download(blob, psdName());
+    await download(new Blob(parts as BlobPart[], { type: 'image/vnd.adobe.photoshop' }), name);
     setDirty(false);
-    status(`Downloaded ${psdName()}`);
+    status(`Downloaded ${name}`);
   } catch (err) {
     console.error(err);
     status(`Save failed: ${(err as Error).message}`, true);
@@ -324,9 +345,11 @@ async function cmdSaveAs(): Promise<void> {
 function cmdExport() {
   if (!doc) return;
   const name = doc.name.replace(/\.[^.]+$/, '') + '.png';
-  flatten(doc).toBlob(async b => {
+  const flat = flatten(doc);
+  const note = doc.scale < 1 ? ` at ${flat.width} × ${flat.height}px (preview size — the document is too large to flatten at full resolution)` : '';
+  flat.toBlob(async b => {
     if (!b) return status('Export failed', true);
-    if (await download(b, name)) status(`Exported ${name}`);
+    if (await download(b, name)) status(`Exported ${name}${note}`);
   }, 'image/png');
 }
 
@@ -344,15 +367,24 @@ async function download(blob: Blob, name: string): Promise<boolean> {
       return false;
     }
   }
+  // A multi-gigabyte download can take minutes to stream out of the blob, and revoking its URL
+  // cancels it, so keep the URL until the next download (or ten minutes).
+  if (lastDownloadUrl) URL.revokeObjectURL(lastDownloadUrl);
+  const url = (lastDownloadUrl = URL.createObjectURL(blob));
+  setTimeout(() => {
+    URL.revokeObjectURL(url);
+    if (lastDownloadUrl === url) lastDownloadUrl = null;
+  }, 10 * 60_000);
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
+  a.href = url;
   a.download = name;
   document.body.appendChild(a);
   a.click();
   a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
   return true;
 }
+
+let lastDownloadUrl: string | null = null;
 
 const confirmDialog = $<HTMLDialogElement>('#confirm-dialog');
 function askConfirm(message: string, okLabel: string): Promise<boolean> {
@@ -368,15 +400,14 @@ async function placeFile(file: File) {
   try {
     let src: HTMLCanvasElement;
     if (isPsd(file.name)) {
-      const buf = await file.arrayBuffer();
-      src = await busy(`Reading ${file.name}…`, () => flatten(loadPsd(buf, file.name)));
+      src = await busy(`Reading ${file.name}…`, async () => flatten(await loadPsd(await readFileChunks(file, () => {}), file.name, busyText)));
     } else {
       const bmp = await createImageBitmap(file);
       src = createCanvas(bmp.width, bmp.height);
       ctx2d(src).drawImage(bmp, 0, 0);
       bmp.close();
     }
-    const layer = makeLayer(file.name.replace(/\.[^.]+$/, ''), src,
+    const layer = layerFromCanvas(file.name.replace(/\.[^.]+$/, ''), src, doc.scale,
       Math.round((doc.width - src.width) / 2), Math.round((doc.height - src.height) / 2));
     pushHistory();
     insertAboveSelected(layer);
@@ -463,13 +494,14 @@ function cmdMove(dir: 1 | -1) {
 
 function cmdFlatten() {
   if (!doc) return;
+  if (doc.scale < 1) return status('Flatten isn’t available for documents this large', true);
   pushHistory();
   const flat = createCanvas(doc.width, doc.height);
   const g = ctx2d(flat);
   g.fillStyle = '#fff';
   g.fillRect(0, 0, doc.width, doc.height);
   g.drawImage(flatten(doc), 0, 0);
-  const layer = makeLayer('Background', flat);
+  const layer = layerFromCanvas('Background', flat, 1);
   doc.layers = [layer];
   selectedId = layer.id;
   refreshAll();
@@ -496,10 +528,15 @@ function leafLayers(l: Layer): Layer[] {
   return l.children ? [...walk(l.children)].map(([x]) => x) : [l];
 }
 
+/** Appends an edit to be replayed on the full-resolution pixels when saving. */
+function recordOp(layer: Layer, op: Op) {
+  layer.ops = [...layer.ops, op];
+}
+
 /**
  * Prepares a layer for pixel editing: rasterizes text/smart/shape layers and swaps in a fresh copy of
- * the canvas (so undo snapshots keep the old one). With `expand`, the new canvas also covers the whole
- * document so you can paint anywhere.
+ * the preview canvas (so undo snapshots keep the old one). With `expand`, the layer also grows to cover
+ * the whole document so you can paint anywhere. Returns where the old preview sits in the new one.
  */
 function beginPixelEdit(layer: Layer, expand: boolean): { base: HTMLCanvasElement | null; dx: number; dy: number } | null {
   if (layer.children) {
@@ -515,12 +552,13 @@ function beginPixelEdit(layer: Layer, expand: boolean): { base: HTMLCanvasElemen
     layer.kind = 'pixel';
     layer.rasterized = true;
   }
+  const s = doc!.scale;
   const base = layer.canvas;
   let left = layer.left;
   let top = layer.top;
-  let right = left + (base?.width ?? 0);
-  let bottom = top + (base?.height ?? 0);
-  if (!base) {
+  let right = left + layer.width;
+  let bottom = top + layer.height;
+  if (!base || !layer.width || !layer.height) {
     left = 0; top = 0; right = doc!.width; bottom = doc!.height;
   } else if (expand) {
     left = Math.min(left, 0);
@@ -528,13 +566,20 @@ function beginPixelEdit(layer: Layer, expand: boolean): { base: HTMLCanvasElemen
     right = Math.max(right, doc!.width);
     bottom = Math.max(bottom, doc!.height);
   }
-  const c = createCanvas(right - left, bottom - top);
-  const dx = layer.left - left;
-  const dy = layer.top - top;
+  const width = right - left;
+  const height = bottom - top;
+  if (width !== layer.width || height !== layer.height) {
+    recordOp(layer, { type: 'expand', dx: layer.left - left, dy: layer.top - top, width, height });
+  }
+  const c = createCanvas(scaled(width, s), scaled(height, s));
+  const dx = Math.round(layer.left * s) - Math.round(left * s);
+  const dy = Math.round(layer.top * s) - Math.round(top * s);
   if (base) ctx2d(c).drawImage(base, dx, dy);
   layer.canvas = c;
   layer.left = left;
   layer.top = top;
+  layer.width = width;
+  layer.height = height;
   return { base, dx, dy };
 }
 
@@ -547,7 +592,7 @@ function transformLayer(flipX: boolean) {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const l of targets) {
     minX = Math.min(minX, l.left); minY = Math.min(minY, l.top);
-    maxX = Math.max(maxX, l.left + l.canvas!.width); maxY = Math.max(maxY, l.top + l.canvas!.height);
+    maxX = Math.max(maxX, l.left + l.width); maxY = Math.max(maxY, l.top + l.height);
   }
   pushHistory();
   for (const l of targets) {
@@ -559,8 +604,9 @@ function transformLayer(flipX: boolean) {
     if (flipX) { g.translate(src.width, 0); g.scale(-1, 1); } else { g.translate(0, src.height); g.scale(1, -1); }
     g.drawImage(src, 0, 0);
     g.restore();
-    if (flipX) l.left = minX + maxX - (l.left + src.width);
-    else l.top = minY + maxY - (l.top + src.height);
+    recordOp(l, { type: 'flip', horizontal: flipX });
+    if (flipX) l.left = minX + maxX - (l.left + l.width);
+    else l.top = minY + maxY - (l.top + l.height);
   }
   refreshAll();
 }
@@ -590,11 +636,12 @@ function cmdAdjust(id: string) {
     requestRender();
   };
 
-  if (!def.params.length) {
+  const commit = () => {
     apply();
+    recordOp(layer, { type: 'adjust', id, values: { ...values } });
     refreshLayers();
-    return;
-  }
+  };
+  if (!def.params.length) return commit();
 
   $('#adjust-title').textContent = def.title;
   const params = $('#adjust-params');
@@ -617,8 +664,7 @@ function cmdAdjust(id: string) {
   adjustDialog.onclose = () => {
     clearTimeout(timer);
     if (adjustDialog.returnValue === 'ok') {
-      apply();
-      refreshLayers();
+      commit();
     } else {
       // Cancel: drop the snapshot we pushed and put things back.
       const s = undoStack.pop();
@@ -632,51 +678,17 @@ function cmdAdjust(id: string) {
 // ---------------------------------------------------------------------------
 // Painting
 
-let tip: HTMLCanvasElement | null = null;
-let tipKey = '';
-
-function brushTip(): HTMLCanvasElement {
-  const key = `${brush.size}|${brush.hardness}|${colorInput.value}`;
-  if (tip && key === tipKey) return tip;
-  const size = Math.max(1, brush.size);
-  const dim = Math.ceil(size) + 2;
-  const c = createCanvas(dim, dim);
-  const g = ctx2d(c);
-  const r = size / 2;
-  const cx = dim / 2;
-  if (brush.hardness >= 0.99 || size <= 2) {
-    g.fillStyle = colorInput.value;
-    g.beginPath();
-    g.arc(cx, cx, r, 0, Math.PI * 2);
-    g.fill();
-  } else {
-    const grad = g.createRadialGradient(cx, cx, 0, cx, cx, r);
-    const [rr, gg, bb] = hexToRgb(colorInput.value);
-    grad.addColorStop(0, `rgba(${rr},${gg},${bb},1)`);
-    grad.addColorStop(Math.max(0, brush.hardness), `rgba(${rr},${gg},${bb},1)`);
-    grad.addColorStop(1, `rgba(${rr},${gg},${bb},0)`);
-    g.fillStyle = grad;
-    g.fillRect(0, 0, dim, dim);
-  }
-  tip = c;
-  tipKey = key;
-  return c;
-}
-
-function hexToRgb(hex: string): [number, number, number] {
-  const n = parseInt(hex.slice(1), 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-}
-
 interface Stroke {
   layer: Layer;
   base: HTMLCanvasElement | null;
   dx: number;
   dy: number;
+  /** Preview-resolution stroke, composited over `base` with the brush opacity. */
   buffer: HTMLCanvasElement;
   last: { x: number; y: number };
   carry: number;
-  erase: boolean;
+  /** Full-resolution dab positions, layer-local, recorded for replay on save. */
+  op: Extract<Op, { type: 'stroke' }>;
 }
 
 let stroke: Stroke | null = null;
@@ -689,20 +701,28 @@ function startStroke(p: { x: number; y: number }, erase: boolean) {
   const prep = beginPixelEdit(sel.layer, true);
   if (!prep) return void undoStack.pop();
   const c = sel.layer.canvas!;
-  stroke = { layer: sel.layer, ...prep, buffer: createCanvas(c.width, c.height), last: p, carry: 0, erase };
+  const op: Stroke['op'] = {
+    type: 'stroke', dabs: [], size: brush.size, hardness: brush.hardness, color: colorInput.value, opacity: brush.opacity, erase,
+  };
+  stroke = { layer: sel.layer, ...prep, buffer: createCanvas(c.width, c.height), last: p, carry: 0, op };
   dab(p.x, p.y);
   composeStroke();
 }
 
+/** Stamps the brush at full-resolution document coordinates (x, y). */
 function dab(x: number, y: number) {
-  const s = stroke!;
-  const t = brushTip();
-  ctx2d(s.buffer).drawImage(t, x - s.layer.left - t.width / 2, y - s.layer.top - t.height / 2);
+  const st = stroke!;
+  const s = doc!.scale;
+  const t = brushTip(st.op.size * s, st.op.hardness, st.op.color);
+  const px = x * s - Math.round(st.layer.left * s);
+  const py = y * s - Math.round(st.layer.top * s);
+  ctx2d(st.buffer).drawImage(t, px - t.width / 2, py - t.height / 2);
+  st.op.dabs.push(x - st.layer.left, y - st.layer.top);
 }
 
 function continueStroke(p: { x: number; y: number }) {
   const s = stroke!;
-  const spacing = Math.max(0.5, brush.size * 0.1);
+  const spacing = Math.max(0.5, s.op.size * 0.1);
   const dist = Math.hypot(p.x - s.last.x, p.y - s.last.y);
   let t = spacing - s.carry;
   while (t <= dist) {
@@ -724,8 +744,8 @@ function composeStroke() {
     g.globalAlpha = 1;
     g.clearRect(0, 0, g.canvas.width, g.canvas.height);
     if (s.base) g.drawImage(s.base, s.dx, s.dy);
-    g.globalAlpha = brush.opacity;
-    g.globalCompositeOperation = s.erase ? 'destination-out' : 'source-over';
+    g.globalAlpha = s.op.opacity;
+    g.globalCompositeOperation = s.op.erase ? 'destination-out' : 'source-over';
     g.drawImage(s.buffer, 0, 0);
     g.globalAlpha = 1;
     g.globalCompositeOperation = 'source-over';
@@ -737,6 +757,7 @@ function endStroke() {
   if (!stroke) return;
   pendingStroke?.();
   pendingStroke = null;
+  recordOp(stroke.layer, stroke.op);
   stroke = null;
   refreshLayers();
 }
@@ -750,54 +771,25 @@ function bucketFill(p: { x: number; y: number }) {
   pushHistory();
   if (!beginPixelEdit(sel.layer, true)) return void undoStack.pop();
   const layer = sel.layer;
+  const s = doc!.scale;
   const c = layer.canvas!;
   const g = ctx2d(c);
   const img = g.getImageData(0, 0, c.width, c.height);
-  const d = img.data;
-  const w = c.width;
-  const h = c.height;
-  const sx = px - layer.left;
-  const sy = py - layer.top;
-  const si = (sy * w + sx) * 4;
-  const [r0, g0, b0, a0] = [d[si], d[si + 1], d[si + 2], d[si + 3]];
-  const tol = brush.tolerance;
-  const match = (i: number) =>
-    Math.abs(d[i] - r0) <= tol && Math.abs(d[i + 1] - g0) <= tol && Math.abs(d[i + 2] - b0) <= tol && Math.abs(d[i + 3] - a0) <= tol;
-  const [fr, fg, fb] = hexToRgb(colorInput.value);
-  const op = brush.opacity;
-  const seen = new Uint8Array(w * h);
-  const stack = [sy * w + sx];
-  seen[sy * w + sx] = 1;
-  const fill: number[] = [];
-  while (stack.length) {
-    const idx = stack.pop()!;
-    if (!match(idx * 4)) continue;
-    fill.push(idx);
-    const x = idx % w;
-    const y = (idx - x) / w;
-    if (x > 0 && !seen[idx - 1]) { seen[idx - 1] = 1; stack.push(idx - 1); }
-    if (x < w - 1 && !seen[idx + 1]) { seen[idx + 1] = 1; stack.push(idx + 1); }
-    if (y > 0 && !seen[idx - w]) { seen[idx - w] = 1; stack.push(idx - w); }
-    if (y < h - 1 && !seen[idx + w]) { seen[idx + w] = 1; stack.push(idx + w); }
-  }
-  for (const idx of fill) {
-    const i = idx * 4;
-    const a = d[i + 3] / 255;
-    const outA = op + a * (1 - op);
-    d[i] = (fr * op + d[i] * a * (1 - op)) / outA;
-    d[i + 1] = (fg * op + d[i + 1] * a * (1 - op)) / outA;
-    d[i + 2] = (fb * op + d[i + 2] * a * (1 - op)) / outA;
-    d[i + 3] = outA * 255;
-  }
+  const sx = Math.min(c.width - 1, Math.floor(p.x * s) - Math.round(layer.left * s));
+  const sy = Math.min(c.height - 1, Math.floor(p.y * s) - Math.round(layer.top * s));
+  floodFill(img, sx, sy, brush.tolerance, colorInput.value, brush.opacity);
   g.putImageData(img, 0, 0);
+  recordOp(layer, {
+    type: 'fill', x: px - layer.left, y: py - layer.top, tolerance: brush.tolerance, color: colorInput.value, opacity: brush.opacity,
+  });
   refreshAll();
 }
 
 function pickColor(p: { x: number; y: number }) {
   if (!doc) return;
-  const x = Math.floor(p.x);
-  const y = Math.floor(p.y);
-  if (x < 0 || y < 0 || x >= doc.width || y >= doc.height) return;
+  if (p.x < 0 || p.y < 0 || p.x >= doc.width || p.y >= doc.height) return;
+  const x = Math.min(view.width - 1, Math.floor(p.x * doc.scale));
+  const y = Math.min(view.height - 1, Math.floor(p.y * doc.scale));
   const [r, g, b, a] = viewCtx.getImageData(x, y, 1, 1).data;
   if (!a) return status('Transparent pixel');
   colorInput.value = '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
@@ -812,8 +804,8 @@ function layerAt(p: { x: number; y: number }): Layer | null {
       if (l.hidden) continue;
       if (l.children) { visit(l.children); continue; }
       if (!l.canvas) continue;
-      const x = Math.floor(p.x - l.left);
-      const y = Math.floor(p.y - l.top);
+      const x = Math.floor(p.x * doc!.scale) - Math.round(l.left * doc!.scale);
+      const y = Math.floor(p.y * doc!.scale) - Math.round(l.top * doc!.scale);
       if (x < 0 || y < 0 || x >= l.canvas.width || y >= l.canvas.height) continue;
       if (ctx2d(l.canvas).getImageData(x, y, 1, 1).data[3] > 10) hits.push(l);
     }
@@ -958,17 +950,33 @@ const ALL_BLEND_MODES: BlendMode[] = [
   'color', 'luminosity',
 ];
 
-function drawThumb(c: HTMLCanvasElement, src: HTMLCanvasElement | null, left: number, top: number) {
+/** Draws a preview canvas covering the given full-resolution bounds into a layer thumbnail. */
+function drawThumb(c: HTMLCanvasElement, src: HTMLCanvasElement | null, left: number, top: number, width: number, height: number) {
   const size = 34;
   const dpr = window.devicePixelRatio || 1;
   c.width = c.height = size * dpr;
-  if (!src || !doc) return;
+  if (!src || !doc) return null;
   const g = ctx2d(c);
   const s = (size * dpr) / Math.max(doc.width, doc.height);
   const ox = (size * dpr - doc.width * s) / 2;
   const oy = (size * dpr - doc.height * s) / 2;
   g.imageSmoothingQuality = 'high';
-  g.drawImage(src, ox + left * s, oy + top * s, src.width * s, src.height * s);
+  g.drawImage(src, ox + left * s, oy + top * s, width * s, height * s);
+  return g;
+}
+
+/** Mask thumbnail: white where the layer shows, black where it's hidden. */
+function drawMaskThumb(c: HTMLCanvasElement, m: NonNullable<Layer['mask']>) {
+  const g = drawThumb(c, m.alpha, m.left, m.top, m.width, m.height);
+  if (!g) return;
+  // The alpha canvas marks revealed pixels, or hidden ones when the mask's default is "reveal".
+  const reveal = m.defaultColor < 128;
+  g.globalCompositeOperation = 'source-in';
+  g.fillStyle = reveal ? '#fff' : '#000';
+  g.fillRect(0, 0, c.width, c.height);
+  g.globalCompositeOperation = 'destination-over';
+  g.fillStyle = reveal ? '#000' : '#fff';
+  g.fillRect(0, 0, c.width, c.height);
 }
 
 function badge(text: string, title: string) {
@@ -1036,14 +1044,14 @@ function layerRow(l: Layer, depth: number): HTMLElement {
   } else {
     const thumb = document.createElement('canvas');
     thumb.className = 'thumb';
-    drawThumb(thumb, l.canvas, l.left, l.top);
+    drawThumb(thumb, l.canvas, l.left, l.top, l.width, l.height);
     row.appendChild(thumb);
   }
   if (l.mask) {
     const m = document.createElement('canvas');
     m.className = 'thumb mask' + (l.mask.disabled ? ' disabled' : '');
     m.title = l.mask.disabled ? 'Layer mask (disabled)' : 'Layer mask';
-    drawThumb(m, l.mask.source, l.mask.left, l.mask.top);
+    drawMaskThumb(m, l.mask);
     row.appendChild(m);
   }
 

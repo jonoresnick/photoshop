@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mini Photoshop</title>
+  <link rel="stylesheet" href="./src/style.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="menubar">
+      <div class="brand">Mini<b>PS</b></div>
+      <nav class="menus">
+        <div class="menu">
+          <button class="menu-title">File</button>
+          <div class="dropdown">
+            <button data-cmd="open">Open… <kbd>Ctrl O</kbd></button>
+            <button data-cmd="new">New… <kbd>Ctrl Alt N</kbd></button>
+            <button data-cmd="place" data-needs-doc>Place Image as Layer…</button>
+            <hr />
+            <button data-cmd="save" data-needs-doc>Save <kbd>Ctrl S</kbd></button>
+            <button data-cmd="saveAs" data-needs-doc>Save As PSD… <kbd>Ctrl Shift S</kbd></button>
+            <button data-cmd="export" data-needs-doc>Export PNG <kbd>Ctrl Shift E</kbd></button>
+          </div>
+        </div>
+        <div class="menu">
+          <button class="menu-title">Edit</button>
+          <div class="dropdown">
+            <button data-cmd="undo" data-needs-doc>Undo <kbd>Ctrl Z</kbd></button>
+            <button data-cmd="redo" data-needs-doc>Redo <kbd>Ctrl Shift Z</kbd></button>
+          </div>
+        </div>
+        <div class="menu">
+          <button class="menu-title">Image</button>
+          <div class="dropdown">
+            <button data-cmd="adjust:brightness" data-needs-doc>Brightness / Contrast…</button>
+            <button data-cmd="adjust:hsl" data-needs-doc>Hue / Saturation… <kbd>Ctrl U</kbd></button>
+            <button data-cmd="adjust:levels" data-needs-doc>Levels… <kbd>Ctrl L</kbd></button>
+            <button data-cmd="adjust:invert" data-needs-doc>Invert <kbd>Ctrl I</kbd></button>
+            <button data-cmd="adjust:desaturate" data-needs-doc>Desaturate <kbd>Ctrl Shift U</kbd></button>
+            <hr />
+            <button data-cmd="flatten" data-needs-doc>Flatten Image</button>
+          </div>
+        </div>
+        <div class="menu">
+          <button class="menu-title">Layer</button>
+          <div class="dropdown">
+            <button data-cmd="newLayer" data-needs-doc>New Layer <kbd>Ctrl Alt Shift N</kbd></button>
+            <button data-cmd="newGroup" data-needs-doc>New Group <kbd>Ctrl G</kbd></button>
+            <button data-cmd="duplicate" data-needs-doc>Duplicate Layer <kbd>Ctrl J</kbd></button>
+            <button data-cmd="delete" data-needs-doc>Delete Layer</button>
+            <hr />
+            <button data-cmd="flipH" data-needs-doc>Flip Horizontal</button>
+            <button data-cmd="flipV" data-needs-doc>Flip Vertical</button>
+            <button data-cmd="toggleClip" data-needs-doc>Toggle Clipping Mask <kbd>Ctrl Alt G</kbd></button>
+            <button data-cmd="toggleMask" data-needs-doc>Enable / Disable Layer Mask</button>
+          </div>
+        </div>
+        <div class="menu">
+          <button class="menu-title">View</button>
+          <div class="dropdown">
+            <button data-cmd="zoomIn" data-needs-doc>Zoom In <kbd>Ctrl +</kbd></button>
+            <button data-cmd="zoomOut" data-needs-doc>Zoom Out <kbd>Ctrl −</kbd></button>
+            <button data-cmd="fit" data-needs-doc>Fit on Screen <kbd>Ctrl 0</kbd></button>
+            <button data-cmd="actual" data-needs-doc>Actual Pixels <kbd>Ctrl 1</kbd></button>
+          </div>
+        </div>
+      </nav>
+      <div class="doc-title" id="doc-title"></div>
+    </header>
+
+    <div class="options" id="options">
+      <label class="opt" data-for="brush eraser">Size
+        <input type="range" id="opt-size" min="1" max="500" value="24" />
+        <input type="number" id="opt-size-num" min="1" max="500" value="24" />
+      </label>
+      <label class="opt" data-for="brush eraser">Hardness
+        <input type="range" id="opt-hardness" min="0" max="100" value="80" />
+        <output id="opt-hardness-out">80%</output>
+      </label>
+      <label class="opt" data-for="brush eraser bucket">Opacity
+        <input type="range" id="opt-opacity" min="1" max="100" value="100" />
+        <output id="opt-opacity-out">100%</output>
+      </label>
+      <label class="opt" data-for="bucket">Tolerance
+        <input type="range" id="opt-tolerance" min="0" max="255" value="32" />
+        <output id="opt-tolerance-out">32</output>
+      </label>
+      <label class="opt" data-for="move">
+        <input type="checkbox" id="opt-autoselect" /> Auto-select layer
+      </label>
+      <span class="opt hint" data-for="eyedropper">Click the image to pick a color</span>
+      <span class="opt hint" data-for="hand">Drag to pan · hold Space with any tool</span>
+    </div>
+
+    <main class="workspace">
+      <aside class="toolbar" id="toolbar">
+        <button data-tool="move" title="Move (V)"><svg viewBox="0 0 24 24"><path d="M12 2l3 3h-2v6h6V9l3 3-3 3v-2h-6v6h2l-3 3-3-3h2v-6H5v2l-3-3 3-3v2h6V5H9z"/></svg></button>
+        <button data-tool="brush" title="Brush (B)"><svg viewBox="0 0 24 24"><path d="M20.7 4.3a1 1 0 0 0-1.4 0L10 13.6l1.4 1.4 9.3-9.3a1 1 0 0 0 0-1.4zM7.5 14c-1.9 0-3.5 1.6-3.5 3.5 0 1.2-1 2.2-2 2.5 1 1.2 2.6 2 4.5 2 2.8 0 5-2.2 5-5 0-1.7-1.3-3-3-3z"/></svg></button>
+        <button data-tool="eraser" title="Eraser (E)"><svg viewBox="0 0 24 24"><path d="M16.2 3.6l4.2 4.2a2 2 0 0 1 0 2.8L11 20h9v2H7.4l-3.8-3.8a2 2 0 0 1 0-2.8L13.4 3.6a2 2 0 0 1 2.8 0zM5 16.8L8.2 20h.8l3.5-3.5-4.2-4.2z"/></svg></button>
+        <button data-tool="bucket" title="Paint Bucket (G)"><svg viewBox="0 0 24 24"><path d="M10 2.6l9.9 9.9-7.8 7.8a2 2 0 0 1-2.8 0l-5.6-5.6a2 2 0 0 1 0-2.8L9.3 6.3 6.9 3.9l1.4-1.4zm0 5.1L4.9 12.8h10.2zM20 15s2 2.4 2 3.8a2 2 0 0 1-4 0c0-1.4 2-3.8 2-3.8z"/></svg></button>
+        <button data-tool="eyedropper" title="Eyedropper (I)"><svg viewBox="0 0 24 24"><path d="M20.7 3.3a3 3 0 0 0-4.2 0l-2.6 2.6-1.4-1.4-1.4 1.4 1.4 1.4-8.5 8.5V20h4.2l8.5-8.5 1.4 1.4 1.4-1.4-1.4-1.4 2.6-2.6a3 3 0 0 0 0-4.2zM7.4 18H6v-1.4l8.1-8.1 1.4 1.4z"/></svg></button>
+        <button data-tool="hand" title="Hand (H)"><svg viewBox="0 0 24 24"><path d="M18 8a1.5 1.5 0 0 0-1.5 1.5V12h-1V4.5a1.5 1.5 0 0 0-3 0V11h-1V3.5a1.5 1.5 0 0 0-3 0V12h-1V6.5a1.5 1.5 0 0 0-3 0V15c0 3.9 3.1 7 7 7s7-3.1 7-7V9.5A1.5 1.5 0 0 0 18 8z"/></svg></button>
+        <div class="swatch-wrap" title="Color">
+          <input type="color" id="color" value="#000000" />
+        </div>
+      </aside>
+
+      <section class="viewport" id="viewport">
+        <div class="stage" id="stage"><canvas id="view"></canvas></div>
+        <div class="brush-cursor" id="brush-cursor"></div>
+        <div class="empty" id="empty">
+          <div class="empty-card">
+            <h1>Open a Photoshop file</h1>
+            <p>Drop a <code>.psd</code> here, or an image (PNG, JPG, WebP).<br />Everything runs in your browser — files never leave your computer.</p>
+            <div class="empty-actions">
+              <button class="primary" data-cmd="open">Open file…</button>
+              <button data-cmd="new">New document</button>
+            </div>
+          </div>
+        </div>
+        <div class="busy" id="busy" hidden><div class="spinner"></div><span id="busy-text">Working…</span></div>
+      </section>
+
+      <aside class="panel">
+        <div class="panel-head">Layers</div>
+        <div class="layer-props">
+          <select id="blend" title="Blend mode"></select>
+          <label>Opacity <input type="number" id="layer-opacity" min="0" max="100" value="100" />%</label>
+        </div>
+        <input type="range" id="layer-opacity-range" min="0" max="100" value="100" class="opacity-range" />
+        <div class="layer-list" id="layer-list"></div>
+        <div class="panel-foot">
+          <button data-cmd="newGroup" data-needs-doc title="New group"><svg viewBox="0 0 24 24"><path d="M3 5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>
+          <button data-cmd="newLayer" data-needs-doc title="New layer"><svg viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg></button>
+          <button data-cmd="duplicate" data-needs-doc title="Duplicate layer"><svg viewBox="0 0 24 24"><path d="M8 8h12v12H8zM4 4h12v2H6v10H4z"/></svg></button>
+          <button data-cmd="moveUp" data-needs-doc title="Move up"><svg viewBox="0 0 24 24"><path d="M12 5l7 7h-5v7h-4v-7H5z"/></svg></button>
+          <button data-cmd="moveDown" data-needs-doc title="Move down"><svg viewBox="0 0 24 24"><path d="M12 19l-7-7h5V5h4v7h5z"/></svg></button>
+          <button data-cmd="delete" data-needs-doc title="Delete layer"><svg viewBox="0 0 24 24"><path d="M9 3h6l1 2h4v2H4V5h4zM6 9h12l-1 12H7z"/></svg></button>
+        </div>
+      </aside>
+    </main>
+
+    <footer class="statusbar">
+      <span id="status-zoom"></span>
+      <span id="status-size"></span>
+      <span id="status-pos"></span>
+      <span class="status-msg" id="status-msg"></span>
+    </footer>
+  </div>
+
+  <dialog id="adjust-dialog">
+    <form method="dialog">
+      <h2 id="adjust-title"></h2>
+      <div id="adjust-params"></div>
+      <div class="dialog-actions">
+        <button value="cancel" type="submit">Cancel</button>
+        <button value="ok" type="submit" class="primary">OK</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="new-dialog">
+    <form method="dialog">
+      <h2>New document</h2>
+      <label>Width <input type="number" id="new-w" min="1" max="30000" value="1920" /> px</label>
+      <label>Height <input type="number" id="new-h" min="1" max="30000" value="1080" /> px</label>
+      <label>Background
+        <select id="new-bg">
+          <option value="#ffffff">White</option>
+          <option value="#000000">Black</option>
+          <option value="">Transparent</option>
+        </select>
+      </label>
+      <div class="dialog-actions">
+        <button value="cancel" type="submit">Cancel</button>
+        <button value="ok" type="submit" class="primary">Create</button>
+      </div>
+    </form>
+  </dialog>
+
+  <input type="file" id="file-open" accept=".psd,.psb,image/*" hidden />
+  <input type="file" id="file-place" accept="image/*,.psd" hidden />
+  <script type="module" src="./src/main.ts"></script>
+</body>
+</html>

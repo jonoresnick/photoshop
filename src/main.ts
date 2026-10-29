@@ -293,8 +293,9 @@ async function cmdSave(): Promise<void> {
   if (!fileHandle) return cmdSaveAs();
   try {
     const { parts } = await encodePsd();
-    const w = await fileHandle.createWritable();
-    await w.write(new Blob(parts as BlobPart[]));
+    const w = await busy('Writing file…', () => fileHandle!.createWritable());
+    // Stream the pieces to disk; a multi-gigabyte file never has to exist in memory as one Blob.
+    for (const part of parts) await w.write(part as BufferSource);
     await w.close();
     setDirty(false);
     status(`Saved ${fileHandle.name}`);
@@ -327,13 +328,16 @@ async function cmdSaveAs(): Promise<void> {
     if (host) {
       const zipName = name.replace(/\.ps[db]$/i, '.zip');
       const zip = await busy('Packing zip…', () => zipSingleFile(name, parts));
+      if (!(await blobUsable(zip))) return;
       if (await download(zip, zipName)) {
         setDirty(false);
         status(`Saved ${zipName} — unzip it to get ${name}`);
       }
       return;
     }
-    await download(new Blob(parts as BlobPart[], { type: 'image/vnd.adobe.photoshop' }), name);
+    const blob = new Blob(parts as BlobPart[], { type: 'image/vnd.adobe.photoshop' });
+    if (!(await blobUsable(blob))) return;
+    await download(blob, name);
     setDirty(false);
     status(`Downloaded ${name}`);
   } catch (err) {
@@ -351,6 +355,22 @@ function cmdExport() {
     if (!b) return status('Export failed', true);
     if (await download(b, name)) status(`Exported ${name}${note}`);
   }, 'image/png');
+}
+
+/**
+ * Browsers keep Blobs in memory in private/incognito windows and can't hold one over ~2 GB there
+ * (normal windows spill them to disk). Check up front instead of letting the download silently fail.
+ */
+async function blobUsable(blob: Blob): Promise<boolean> {
+  if (blob.size < 1.9e9) return true;
+  try {
+    await blob.slice(blob.size - 1).arrayBuffer();
+    return true;
+  } catch {
+    status(`The browser couldn’t hold the ${(blob.size / 1e9).toFixed(1)} GB file for download. ` +
+      'Private/incognito windows can’t save files over 2 GB; use a normal window and try again.', true);
+    return false;
+  }
 }
 
 /** Resolves false if the viewer declined the save. */

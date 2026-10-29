@@ -53,7 +53,7 @@ Big templates are supported, including PSB files larger than 2 GB:
 - **Untouched layers are copied byte-for-byte** from the original file, so they keep their exact pixels, bit depth and color mode.
 - **PSB files are saved as PSB** (Photoshop's large document format), and PSD as PSD; documents wider or taller than 30,000 px are always PSB.
 
-What you need: RAM of roughly the file size plus ~2 GB while open, and about twice the file size while saving. Chrome or Edge work best.
+What you need: RAM of roughly the file size plus ~2 GB while open, and about twice the file size while saving. Chrome or Edge work best, in a **normal (not private/incognito) window**: private windows can't hold a download over 2 GB.
 
 For large documents, **Export PNG** produces an image at preview resolution, and **Flatten Image** is unavailable.
 

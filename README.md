@@ -5,7 +5,13 @@ Everything runs locally in your browser — files are never uploaded anywhere.
 
 Built with TypeScript, Vite and [ag-psd](https://github.com/Agamnentzar/ag-psd) for PSD reading/writing.
 
-## Run it
+## Use it online
+
+**https://jonoresnick.github.io/photoshop/**, rebuilt and deployed by GitHub Actions on every push (`.github/workflows/pages.yml`).
+
+One-time setup: in the repository's **Settings → Pages**, set **Source** to **GitHub Actions** and leave **Custom domain** empty.
+
+## Run it locally
 
 ```bash
 npm install

@@ -28,6 +28,11 @@ npm run dev        # http://localhost:5173
 - Opacity, blend modes, clipping masks, enable/disable layer mask
 - Flip horizontal/vertical, flatten image
 
+**Smart objects**
+- Click **Edit** on a smart-object layer (or double-click its thumbnail, or Layer → Edit Smart Object Contents). Its contents open in a new tab.
+- Edit them like any document, then click **Apply to …** (or press Ctrl+S). The template is updated: every layer that uses that smart object is re-rendered through its position, scale and perspective, and the embedded file is replaced. It stays a smart object in Photoshop.
+- Works for smart objects that embed a PSD/PSB, PNG or JPEG. Smart objects linked to outside files, or containing vector files (AI/PDF), can't be opened. Warps and smart filters aren't re-applied after editing (you get a warning).
+
 **Tools**
 | Tool | Key | Notes |
 |---|---|---|
@@ -62,7 +67,7 @@ For large documents, **Export PNG** produces an image at preview resolution, and
 This is a minimal editor, so some Photoshop features are preserved in the file but not shown in the preview:
 
 - **Layer effects** (drop shadow, stroke, …) and **adjustment layers** are kept when you save, but aren't rendered on screen. Layers that have them are tagged `fx` / `ADJ` in the layers panel.
-- **Text, smart object and shape layers** are shown as their rendered pixels. Moving them keeps them editable in Photoshop; painting, adjusting or flipping them rasterizes them (turns them into normal pixel layers).
+- **Text and shape layers** are shown as their rendered pixels. Moving them keeps them editable in Photoshop; painting, adjusting or flipping them (or a smart-object layer directly, instead of using Edit) rasterizes them.
 - A few rarer blend modes (vivid/linear/pin light, hard mix, subtract, divide, darker/lighter color, dissolve) are approximated in the preview (tagged `≈`). The blend mode itself is saved correctly.
 - Documents keep their color mode and bit depth (RGB, Grayscale, CMYK; 8/16-bit). Layers you edit are edited in 8-bit RGB and converted back when saving.
 - When the document is previewed at reduced resolution, the saved file's flattened composite is left blank and Photoshop rebuilds it from the layers when it opens the file.

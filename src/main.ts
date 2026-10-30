@@ -7,6 +7,7 @@ import {
 import { readFileChunks } from './bigfile';
 import { brushTip, floodFill, type Op } from './pixels';
 import { EXACT_BLEND_MODES, flatten, previewSize, renderDoc } from './render';
+import { applySmartObject, encodeSmartObject, openSmartObject, smartLink, type EmbeddedKind } from './smart';
 import { zipSingleFile } from './zip';
 
 type Tool = 'move' | 'brush' | 'eraser' | 'bucket' | 'eyedropper' | 'hand';
@@ -57,12 +58,14 @@ let panX = 0;
 let panY = 0;
 let spaceDown = false;
 
-interface Snapshot { layers: Layer[]; selectedId: number | null; width: number; height: number }
-const undoStack: Snapshot[] = [];
-const redoStack: Snapshot[] = [];
+interface Snapshot { layers: Layer[]; selectedId: number | null; width: number; height: number; raw: Doc['raw'] }
+let undoStack: Snapshot[] = [];
+let redoStack: Snapshot[] = [];
 const HISTORY_LIMIT = 40;
 
-const snapshot = (): Snapshot => ({ layers: cloneLayers(doc!.layers), selectedId, width: doc!.width, height: doc!.height });
+const snapshot = (): Snapshot => ({
+  layers: cloneLayers(doc!.layers), selectedId, width: doc!.width, height: doc!.height, raw: doc!.raw,
+});
 
 function pushHistory() {
   if (!doc) return;
@@ -76,6 +79,7 @@ function restore(s: Snapshot) {
   doc!.layers = s.layers;
   doc!.width = s.width;
   doc!.height = s.height;
+  doc!.raw = s.raw;
   selectedId = s.selectedId;
   setDirty(true);
   refreshAll();
@@ -98,6 +102,180 @@ function redo() {
 function setDirty(v: boolean) {
   dirty = v;
   updateTitle();
+  renderTabs();
+}
+
+// ---------------------------------------------------------------------------
+// Tabs: the opened file, plus any smart objects opened from it. The globals above always hold the
+// state of the visible tab; switching tabs stores them in the tab and loads the other one's.
+
+interface Tab {
+  doc: Doc;
+  fileHandle: FileHandle | null;
+  selectedId: number | null;
+  undo: Snapshot[];
+  redo: Snapshot[];
+  dirty: boolean;
+  view: { zoom: number; panX: number; panY: number } | null;
+  /** Set for a smart object opened from another tab. */
+  parent?: { tab: Tab; id: string; layerName: string; kind: EmbeddedKind };
+}
+
+let tabs: Tab[] = [];
+let current: Tab | null = null;
+
+const newTab = (d: Doc, handle: FileHandle | null = null, parent?: Tab['parent']): Tab => ({
+  doc: d, fileHandle: handle, selectedId: d.layers[d.layers.length - 1]?.id ?? null,
+  undo: [], redo: [], dirty: false, view: null, parent,
+});
+
+function stashTab() {
+  if (!current || !doc) return;
+  Object.assign(current, { doc, fileHandle, selectedId, undo: undoStack, redo: redoStack, dirty, view: { zoom, panX, panY } });
+}
+
+function showTab(t: Tab) {
+  stashTab();
+  current = t;
+  doc = t.doc;
+  fileHandle = t.fileHandle;
+  selectedId = t.selectedId;
+  undoStack = t.undo;
+  redoStack = t.redo;
+  dirty = t.dirty;
+  const { w, h } = previewSize(t.doc);
+  view.width = w;
+  view.height = h;
+  $('#empty').hidden = true;
+  $('#status-size').textContent = `${t.doc.width} × ${t.doc.height}px` + (t.doc.scale < 1 ? ` · previewing at ${Math.round(t.doc.scale * 100)}%` : '');
+  $('#status-size').title = t.doc.scale < 1
+    ? 'This document is too big to show at full resolution, so you see a smaller preview. Edits are applied at full resolution when you save.'
+    : '';
+  document.querySelectorAll<HTMLButtonElement>('[data-needs-doc]').forEach(b => (b.disabled = false));
+  const banner = $('#so-banner');
+  banner.hidden = !t.parent;
+  if (t.parent) {
+    $('#so-banner-name').textContent = t.parent.layerName;
+    $('#so-banner-parent').textContent = t.parent.tab.doc.name;
+    $('#so-apply').textContent = `Apply to ${t.parent.tab.doc.name}`;
+  }
+  if (t.view) {
+    ({ zoom, panX, panY } = t.view);
+    applyView();
+  } else {
+    fitView();
+  }
+  updateTitle();
+  renderTabs();
+  refreshAll();
+}
+
+function renderTabs() {
+  const bar = $('#tabs');
+  bar.hidden = tabs.length === 0;
+  bar.innerHTML = '';
+  for (const t of tabs) {
+    const isCurrent = t === current;
+    const el = document.createElement('div');
+    el.className = 'tab' + (isCurrent ? ' active' : '') + (t.parent ? ' child' : '');
+    el.title = t.parent ? `Smart object “${t.parent.layerName}” in ${t.parent.tab.doc.name}` : t.doc.name;
+    const label = document.createElement('span');
+    label.textContent = (t.parent ? '↳ ' : '') + t.doc.name + ((isCurrent ? dirty : t.dirty) ? ' •' : '');
+    const close = document.createElement('button');
+    close.className = 'tab-close';
+    close.textContent = '×';
+    close.title = 'Close';
+    close.onclick = e => {
+      e.stopPropagation();
+      closeTab(t);
+    };
+    el.append(label, close);
+    el.onclick = () => t !== current && showTab(t);
+    bar.appendChild(el);
+  }
+}
+
+const tabDirty = (t: Tab) => (t === current ? dirty : t.dirty);
+const anyDirty = () => tabs.some(tabDirty);
+
+/** Closes a tab and any smart objects opened from it. */
+async function closeTab(t: Tab, force = false) {
+  const family = [t, ...tabs.filter(x => { for (let p = x.parent; p; p = p.tab.parent) if (p.tab === t) return true; return false; })];
+  const unsaved = family.filter(tabDirty);
+  if (!force && unsaved.length) {
+    const what = t.parent ? `your changes to the smart object “${t.parent.layerName}”` : `unsaved changes to ${unsaved.map(x => x.doc.name).join(', ')}`;
+    if (!(await askConfirm(`Close and discard ${what}?`, 'Discard'))) return;
+  }
+  tabs = tabs.filter(x => !family.includes(x));
+  if (family.includes(current!)) {
+    current = null;
+    const next = (t.parent && tabs.includes(t.parent.tab)) ? t.parent.tab : tabs[tabs.length - 1];
+    if (next) showTab(next);
+    else clearDoc();
+  } else {
+    renderTabs();
+  }
+}
+
+function clearDoc() {
+  doc = null;
+  fileHandle = null;
+  selectedId = null;
+  undoStack = [];
+  redoStack = [];
+  dirty = false;
+  $('#empty').hidden = false;
+  $('#so-banner').hidden = true;
+  $('#status-size').textContent = '';
+  view.width = view.height = 0;
+  document.querySelectorAll<HTMLButtonElement>('[data-needs-doc]').forEach(b => (b.disabled = true));
+  updateTitle();
+  renderTabs();
+  refreshLayers();
+}
+
+// ---------------------------------------------------------------------------
+// Smart objects
+
+async function cmdEditSmart(layerId = selectedId) {
+  if (!doc || layerId == null || !current) return;
+  const found = findLayer(doc, layerId);
+  if (!found) return;
+  const layer = found.layer;
+  const link = smartLink(doc, layer);
+  if (typeof link === 'string') return status(link, true);
+  const open = tabs.find(t => t.parent?.tab === current && t.parent.id === link.file.id);
+  if (open) return showTab(open);
+  try {
+    const inner = await busy(`Opening smart object “${layer.name}”…`, () => openSmartObject(link, busyText));
+    const t = newTab(inner, null, { tab: current, id: link.file.id, layerName: layer.name, kind: link.kind });
+    tabs.splice(tabs.indexOf(current) + 1, 0, t);
+    showTab(t);
+    status(link.warning ?? `Editing “${layer.name}”. When you’re done, click “Apply to ${t.parent!.tab.doc.name}”.`, !!link.warning);
+  } catch (err) {
+    console.error(err);
+    status(`Couldn’t open the smart object: ${(err as Error).message}`, true);
+  }
+}
+
+/** Puts the edited smart object back into the document it came from. */
+async function cmdApplySmart() {
+  const t = current;
+  if (!t?.parent || !doc) return;
+  const { tab: parentTab, id, layerName, kind } = t.parent;
+  try {
+    const inner = doc;
+    const { bytes, flat } = await busy(`Updating “${layerName}”…`, () => encodeSmartObject(inner, kind, busyText));
+    showTab(parentTab);
+    pushHistory();
+    const n = applySmartObject(doc!, id, bytes, flat);
+    await closeTab(t, true);
+    refreshAll();
+    status(`Updated “${layerName}”` + (n > 1 ? ` (${n} layers use this smart object)` : '') + '. Save to keep the change.');
+  } catch (err) {
+    console.error(err);
+    status(`Couldn’t apply the smart object: ${(err as Error).message}`, true);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -193,31 +371,18 @@ function toDoc(e: { clientX: number; clientY: number }) {
 // ---------------------------------------------------------------------------
 // Document lifecycle
 
+/** Opens a document in place of everything currently open. */
 function setDoc(d: Doc, handle: FileHandle | null = null) {
-  doc = d;
-  fileHandle = handle;
-  const { w, h } = previewSize(d);
-  view.width = w;
-  view.height = h;
-  undoStack.length = 0;
-  redoStack.length = 0;
-  const top = d.layers[d.layers.length - 1];
-  selectedId = top?.id ?? null;
-  $('#empty').hidden = true;
-  $('#status-size').textContent = `${d.width} × ${d.height}px` + (d.scale < 1 ? ` · previewing at ${Math.round(d.scale * 100)}%` : '');
-  $('#status-size').title = d.scale < 1
-    ? 'This document is too big to show at full resolution, so you see a smaller preview. Edits are applied at full resolution when you save.'
-    : '';
-  document.querySelectorAll<HTMLButtonElement>('[data-needs-doc]').forEach(b => (b.disabled = false));
-  setDirty(false);
-  fitView();
-  refreshAll();
+  current = null;
+  const t = newTab(d, handle);
+  tabs = [t];
+  showTab(t);
 }
 
 const isPsd = (name: string) => /\.(psd|psb)$/i.test(name);
 
 async function openFile(file: File, handle: FileHandle | null = null) {
-  if (dirty && !(await askConfirm(`Discard unsaved changes to ${doc!.name}?`, 'Discard'))) return;
+  if (anyDirty() && !(await askConfirm(`Discard unsaved changes to ${tabs.filter(tabDirty).map(t => t.doc.name).join(', ')}?`, 'Discard'))) return;
   try {
     if (isPsd(file.name)) {
       const d = await busy(`Opening ${file.name}…`, async () => {
@@ -290,6 +455,8 @@ const psdName = () => doc!.name.replace(/\.[^.]+$/, '') + (/\.psb$/i.test(doc!.n
 
 async function cmdSave(): Promise<void> {
   if (!doc) return;
+  // In a smart object, Save puts the changes back into the parent document (like Photoshop).
+  if (current?.parent) return cmdApplySmart();
   if (!fileHandle) return cmdSaveAs();
   try {
     const { parts } = await encodePsd();
@@ -307,6 +474,7 @@ async function cmdSave(): Promise<void> {
 
 async function cmdSaveAs(): Promise<void> {
   if (!doc) return;
+  if (current?.parent) return cmdApplySmart();
   try {
     const host = await hostDownloads;
     if (!host && canUsePickers && pickerWin.showSaveFilePicker) {
@@ -844,7 +1012,8 @@ type Drag =
 let drag: Drag | null = null;
 
 viewport.addEventListener('pointerdown', e => {
-  if (!doc || (e.target as HTMLElement).closest('.empty')) return;
+  // Controls floating over the canvas (the empty-state card, the smart-object banner) handle their own clicks.
+  if (!doc || (e.target as HTMLElement).closest('.empty, .so-banner')) return;
   if (e.button !== 0 && e.button !== 1) return;
   viewport.setPointerCapture(e.pointerId);
   const p = toDoc(e);
@@ -1064,6 +1233,14 @@ function layerRow(l: Layer, depth: number): HTMLElement {
   } else {
     const thumb = document.createElement('canvas');
     thumb.className = 'thumb';
+    if (l.kind === 'smart') {
+      thumb.classList.add('smart');
+      thumb.title = 'Double-click to edit the smart object';
+      thumb.ondblclick = e => {
+        e.stopPropagation();
+        cmdEditSmart(l.id);
+      };
+    }
     drawThumb(thumb, l.canvas, l.left, l.top, l.width, l.height);
     row.appendChild(thumb);
   }
@@ -1088,7 +1265,18 @@ function layerRow(l: Layer, depth: number): HTMLElement {
   const badges = document.createElement('span');
   badges.className = 'badges';
   if (l.kind === 'text') badges.appendChild(badge('T', 'Text layer (shown as rendered; editing pixels rasterizes it)'));
-  if (l.kind === 'smart') badges.appendChild(badge('SO', 'Smart object (editing pixels rasterizes it)'));
+  if (l.kind === 'smart') {
+    const edit = document.createElement('button');
+    edit.className = 'so-edit';
+    edit.textContent = 'Edit';
+    edit.title = 'Open this smart object’s contents to edit them (or double-click the thumbnail)';
+    edit.onclick = e => {
+      e.stopPropagation();
+      selectedId = l.id;
+      cmdEditSmart(l.id);
+    };
+    badges.appendChild(edit);
+  }
   if (l.kind === 'shape') badges.appendChild(badge('◆', 'Shape / vector layer'));
   if (l.kind === 'adjustment') badges.appendChild(badge('ADJ', 'Adjustment layer — kept in the file but not previewed'));
   if (l.raw.effects) badges.appendChild(badge('fx', 'Layer effects — kept in the file but not previewed'));
@@ -1278,7 +1466,7 @@ const commands: Record<string, () => void> = {
     dlg.returnValue = '';
     dlg.onclose = async () => {
       if (dlg.returnValue !== 'ok') return;
-      if (dirty && !(await askConfirm(`Discard unsaved changes to ${doc!.name}?`, 'Discard'))) return;
+      if (anyDirty() && !(await askConfirm(`Discard unsaved changes to ${tabs.filter(tabDirty).map(t => t.doc.name).join(', ')}?`, 'Discard'))) return;
       const w = Math.min(30000, Math.max(1, +$<HTMLInputElement>('#new-w').value || 1));
       const h = Math.min(30000, Math.max(1, +$<HTMLInputElement>('#new-h').value || 1));
       setDoc(newDoc(w, h, $<HTMLSelectElement>('#new-bg').value || null));
@@ -1302,6 +1490,9 @@ const commands: Record<string, () => void> = {
   flipV: () => transformLayer(false),
   toggleClip: cmdToggleClip,
   toggleMask: cmdToggleMask,
+  editSmart: () => cmdEditSmart(),
+  applySmart: cmdApplySmart,
+  closeTab: () => current && closeTab(current),
   zoomIn: () => zoomAt(1.25),
   zoomOut: () => zoomAt(0.8),
   fit: fitView,
@@ -1438,7 +1629,7 @@ viewport.addEventListener('drop', async e => {
 });
 
 window.addEventListener('beforeunload', e => {
-  if (dirty) e.preventDefault();
+  if (anyDirty()) e.preventDefault();
 });
 window.addEventListener('resize', () => {
   if (doc) applyView();

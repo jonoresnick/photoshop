@@ -125,6 +125,43 @@ export class Splicer {
     let delta = 0;
     const isPlaceholder = (o: number, len: number) =>
       len >= 8 && len <= 11 && MAGIC.every((b, i) => buf[o + i] === b);
+    const u64 = (o: number) => v.getUint32(o) * 0x100000000 + v.getUint32(o + 4);
+    const setU64 = (o: number, n: number) => {
+      v.setUint32(o, Math.floor(n / 0x100000000));
+      v.setUint32(o + 4, n >>> 0);
+    };
+
+    /** Embedded smart-object files ('lnk2' entries). Returns the change in the block's length. */
+    const scanLinkedFiles = (start: number, end: number): number => {
+      let d = 0;
+      let e = start;
+      while (e + 8 < end) {
+        const size = u64(e);
+        const b = e + 8;
+        const type = String.fromCharCode(buf[b], buf[b + 1], buf[b + 2], buf[b + 3]);
+        let p = b + 8; // type, version
+        p += 1 + buf[p]; // id (pascal string)
+        p += 4 + 2 * v.getUint32(p); // name (unicode string)
+        p += 8; // file type, creator
+        const dataSizeOff = p;
+        const dataSize = u64(p);
+        if (type === 'liFD' && dataSize >= 8 && dataSize <= 11) {
+          // The data follows an optional descriptor; find the placeholder itself.
+          for (let q = dataSizeOff + 9; q + dataSize <= b + size; q++) {
+            if (!isPlaceholder(q, dataSize)) continue;
+            const data = this.real[v.getUint32(q + 4)];
+            const change = data.length - dataSize;
+            setU64(dataSizeOff, data.length);
+            setU64(e, size + change);
+            holes.push({ start: q, end: q + dataSize, data });
+            d += change;
+            break;
+          }
+        }
+        e = b + size + ((4 - (size % 4)) % 4);
+      }
+      return d;
+    };
 
     /** Parses layer records + channel data starting at `o` (just after a layer info length field). */
     const scanLayerInfo = (o: number): number => {
@@ -189,8 +226,9 @@ export class Splicer {
       const blockLenOff = o + 8;
       const blockLen = big ? readLen(blockLenOff) : v.getUint32(blockLenOff);
       const body = blockLenOff + (big ? 8 : 4);
-      if (key === 'Lr16' || key === 'Lr32' || key === 'Layr') {
-        const d = scanLayerInfo(body);
+      const isLayers = key === 'Lr16' || key === 'Lr32' || key === 'Layr';
+      if (isLayers || key === 'lnk2' || key === 'lnk3' || key === 'lnkD') {
+        const d = isLayers ? scanLayerInfo(body) : scanLinkedFiles(body, body + blockLen);
         if (big) addLen(blockLenOff, d); else v.setUint32(blockLenOff, blockLen + d);
         delta += d;
       }
@@ -201,6 +239,7 @@ export class Splicer {
     // Stitch the pieces together.
     const parts: Uint8Array[] = [];
     let pos = 0;
+    holes.sort((a, b) => a.start - b.start);
     for (const h of holes) {
       parts.push(buf.subarray(pos, h.start), h.data);
       pos = h.end;

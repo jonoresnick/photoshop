@@ -1,5 +1,6 @@
 import type { BlendMode } from 'ag-psd';
-import { createCanvas, ctx2d, scaled, type Doc, type Layer } from './doc';
+import { createCanvas, ctx2d, fullResPixels, scaled, type Doc, type Layer } from './doc';
+import { drawPixelsScaled, type Pixels } from './pixels';
 
 const BLEND: Partial<Record<BlendMode, GlobalCompositeOperation>> = {
   'normal': 'source-over',
@@ -65,17 +66,37 @@ class ScratchPool {
 
 const pool = new ScratchPool();
 
-/** Preview-space size and scale of the document being rendered. */
-interface View { w: number; h: number; s: number }
+export const previewSize = (doc: Doc) => ({ w: scaled(doc.width, doc.scale), h: scaled(doc.height, doc.scale) });
+
+interface Placed { canvas: HTMLCanvasElement; x: number; y: number }
+
+/** Output size, plus where each layer's pixels and mask come from (previews, or decoded full resolution). */
+interface View {
+  w: number;
+  h: number;
+  pixels(layer: Layer): Placed | null;
+  mask(layer: Layer): Placed | null;
+}
+
+function previewView(doc: Doc): View {
+  const s = doc.scale;
+  return {
+    ...previewSize(doc),
+    pixels: l => (l.canvas ? { canvas: l.canvas, x: Math.round(l.left * s), y: Math.round(l.top * s) } : null),
+    mask: l => (l.mask ? { canvas: l.mask.alpha, x: Math.round(l.mask.left * s), y: Math.round(l.mask.top * s) } : null),
+  };
+}
 
 function applyMask(g: CanvasRenderingContext2D, layer: Layer, v: View) {
   const m = layer.mask;
   if (!m || m.disabled) return;
+  const placed = v.mask(layer);
+  if (!placed) return;
   // defaultColor 0: outside the mask is hidden, so keep only what the mask reveals.
   // defaultColor 255: outside is visible, so cut away what the (inverted) mask hides.
   g.globalAlpha = 1;
   g.globalCompositeOperation = m.defaultColor >= 128 ? 'destination-out' : 'destination-in';
-  g.drawImage(m.alpha, Math.round(m.left * v.s), Math.round(m.top * v.s));
+  g.drawImage(placed.canvas, placed.x, placed.y);
   g.globalCompositeOperation = 'source-over';
 }
 
@@ -98,15 +119,16 @@ function drawLayer(target: CanvasRenderingContext2D, layer: Layer, v: View) {
     pool.release(g);
     return;
   }
-  if (!layer.canvas) return;
+  const p = v.pixels(layer);
+  if (!p) return;
   if (hasMask(layer)) {
     const g = pool.acquire(v.w, v.h);
-    g.drawImage(layer.canvas, Math.round(layer.left * v.s), Math.round(layer.top * v.s));
+    g.drawImage(p.canvas, p.x, p.y);
     applyMask(g, layer, v);
     blit(target, g.canvas, 0, 0, layer.opacity, layer.blendMode);
     pool.release(g);
   } else {
-    blit(target, layer.canvas, Math.round(layer.left * v.s), Math.round(layer.top * v.s), layer.opacity, layer.blendMode);
+    blit(target, p.canvas, p.x, p.y, layer.opacity, layer.blendMode);
   }
 }
 
@@ -148,16 +170,46 @@ function renderStack(target: CanvasRenderingContext2D, layers: Layer[], v: View)
   }
 }
 
-export const previewSize = (doc: Doc) => ({ w: scaled(doc.width, doc.scale), h: scaled(doc.height, doc.scale) });
-
-/** Composites the document's preview (at doc.scale) onto `target`. */
-export function renderDoc(target: CanvasRenderingContext2D, doc: Doc) {
-  const v = { ...previewSize(doc), s: doc.scale };
+function render(target: CanvasRenderingContext2D, layers: Layer[], v: View) {
   target.setTransform(1, 0, 0, 1, 0, 0);
   target.globalAlpha = 1;
   target.globalCompositeOperation = 'source-over';
   target.clearRect(0, 0, v.w, v.h);
-  renderStack(target, doc.layers, v);
+  renderStack(target, layers, v);
+}
+
+/** Composites the document's preview (at doc.scale) onto `target`. */
+export function renderDoc(target: CanvasRenderingContext2D, doc: Doc) {
+  render(target, doc.layers, previewView(doc));
+}
+
+/** Largest flattened image we'll build at full resolution (the browser's canvas area limit is ~268 MP). */
+export const MAX_FULL_RES_PIXELS = 200_000_000;
+
+/**
+ * The flattened document at full resolution, decoding one layer at a time. Returns null when the
+ * document is too large for a single canvas.
+ */
+export function flattenFullRes(doc: Doc): HTMLCanvasElement | null {
+  if (doc.scale === 1) return flatten(doc);
+  if (doc.width * doc.height > MAX_FULL_RES_PIXELS) return null;
+  const toCanvas = (p: Pixels) => {
+    const c = createCanvas(p.width, p.height);
+    drawPixelsScaled(p, ctx2d(c), 1);
+    return c;
+  };
+  const v: View = {
+    w: doc.width,
+    h: doc.height,
+    pixels: l => {
+      const p = fullResPixels(l, doc.scale);
+      return p ? { canvas: toCanvas(p), x: l.left, y: l.top } : null;
+    },
+    mask: l => (l.mask ? { canvas: toCanvas(l.mask.decode()), x: l.mask.left, y: l.mask.top } : null),
+  };
+  const c = createCanvas(doc.width, doc.height);
+  render(ctx2d(c), doc.layers, v);
+  return c;
 }
 
 /** The flattened preview (full resolution when doc.scale is 1). */

@@ -52,6 +52,7 @@
             <hr />
             <button data-cmd="flipH" data-needs-doc>Flip Horizontal</button>
             <button data-cmd="flipV" data-needs-doc>Flip Vertical</button>
+            <button data-cmd="editSmart" data-needs-doc>Edit Smart Object Contents…</button>
             <button data-cmd="toggleClip" data-needs-doc>Toggle Clipping Mask <kbd>Ctrl Alt G</kbd></button>
             <button data-cmd="toggleMask" data-needs-doc>Enable / Disable Layer Mask</button>
           </div>
@@ -68,6 +69,8 @@
       </nav>
       <div class="doc-title" id="doc-title"></div>
     </header>
+
+    <div class="tabs" id="tabs" hidden></div>
 
     <div class="options" id="options">
       <label class="opt" data-for="brush eraser">Size
@@ -109,6 +112,11 @@
       <section class="viewport" id="viewport">
         <div class="stage" id="stage"><canvas id="view"></canvas></div>
         <div class="brush-cursor" id="brush-cursor"></div>
+        <div class="so-banner" id="so-banner" hidden>
+          <span>Editing smart object <b id="so-banner-name"></b> from <span id="so-banner-parent"></span></span>
+          <button class="primary" data-cmd="applySmart" id="so-apply">Apply</button>
+          <button data-cmd="closeTab">Cancel</button>
+        </div>
         <div class="empty" id="empty">
           <div class="empty-card">
             <h1>Open a Photoshop file</h1>

@@ -27,6 +27,8 @@ export type LayerKind = 'pixel' | 'group' | 'text' | 'smart' | 'shape' | 'adjust
 export interface LayerMask {
   /** Preview alpha (at doc.scale): alpha = mask value, or its inverse when defaultColor is 255. */
   alpha: HTMLCanvasElement;
+  /** The same alpha at full resolution. */
+  decode(): Pixels;
   /** Full-resolution bounds, in document coordinates. */
   left: number;
   top: number;
@@ -70,6 +72,8 @@ export interface Layer {
   mask?: LayerMask;
   /** True once pixels were edited, so text/smart-object/vector data is dropped on save. */
   rasterized: boolean;
+  /** The pixels were re-rendered from new data (an edited smart object), so `raw.rawData` is stale. */
+  replaced?: boolean;
   /** Position at load time, used to shift text/smart-object transforms on save. */
   originLeft: number;
   originTop: number;
@@ -225,8 +229,10 @@ export async function loadPsd(chunks: Uint8Array<ArrayBuffer>[], name: string, o
       const maskPixels = getLayerMaskImageData(l);
       if (maskPixels) {
         const defaultColor = m.defaultColor ?? 0;
+        const decodeAlpha = (p: PixelData) => maskToAlpha(toRGBA8(p), defaultColor >= 128);
         layer.mask = {
-          alpha: previewOf(maskToAlpha(toRGBA8(maskPixels), defaultColor >= 128), scale),
+          alpha: previewOf(decodeAlpha(maskPixels), scale),
+          decode: () => decodeAlpha(getLayerMaskImageData(l)!),
           left: m.left ?? 0, top: m.top ?? 0, width: mw, height: mh, defaultColor, disabled: !!m.disabled,
         };
       }
@@ -292,7 +298,7 @@ function shiftTransform(t: number[] | undefined, dx: number, dy: number, pairs: 
 }
 
 /** The layer's real pixels: decoded from the file, with all edits re-applied at full resolution. */
-function fullResPixels(l: Layer, scale: number): Pixels | null {
+export function fullResPixels(l: Layer, scale: number): Pixels | null {
   if (scale === 1 && l.canvas && (l.ops.length || !l.source)) return canvasToPixels(l.canvas);
   let p = l.source ? l.source.decode() : null;
   for (const op of l.ops) {
@@ -389,7 +395,7 @@ async function toPsdLayer(l: Layer, ctx: SaveContext): Promise<PsdLayer> {
     out.realMask = { ...r, left: (r.left ?? 0) + dx, top: (r.top ?? 0) + dy, right: (r.right ?? 0) + dx, bottom: (r.bottom ?? 0) + dy };
   }
 
-  const untouched = l.ops.length === 0 && !!l.raw.rawData;
+  const untouched = !l.replaced && l.ops.length === 0 && !!l.raw.rawData;
   if (untouched) {
     // Write the original compressed pixels back as they were.
     out.left = l.left;
@@ -444,6 +450,8 @@ export async function savePsd(doc: Doc, composite: HTMLCanvasElement | null, thu
     }
   };
   swapIn(children);
+  // Embedded smart-object files can be most of a template's size; splice those too.
+  const linkedFiles = doc.raw.linkedFiles?.map(f => (splicer.wants(f.data) ? { ...f, data: splicer.placeholder(f.data) } : f));
 
   // Without a real composite, ag-psd writes the document as 1×1 and a blank full-size composite is
   // spliced in, so it never has to allocate one the size of the document.
@@ -455,6 +463,7 @@ export async function savePsd(doc: Doc, composite: HTMLCanvasElement | null, thu
     colorMode: writeColorMode,
     bitsPerChannel: writeBits,
     children,
+    linkedFiles,
     canvas: composite ?? undefined,
     imageResources,
   };
@@ -512,4 +521,15 @@ export function duplicateLayer(l: Layer): Layer {
     mask: l.mask && { ...l.mask },
     children: l.children?.map(duplicateLayer),
   };
+}
+
+/** Joins byte ranges into one buffer (for files that must be a single block, e.g. embedded ones). */
+export function joinParts(parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of parts) {
+    out.set(p, o);
+    o += p.length;
+  }
+  return out;
 }

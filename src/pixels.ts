@@ -80,6 +80,21 @@ export function drawPixelsScaled(p: Pixels, target: CanvasRenderingContext2D, sc
   }
 }
 
+/**
+ * Renders full-resolution pixels tile by tile: `draw` is called with a tile-sized context whose origin is
+ * already translated so it can draw in the image's own coordinates.
+ */
+export function renderTiled(width: number, height: number, draw: (g: CanvasRenderingContext2D) => void): Pixels {
+  const p = blankPixels(width, height);
+  for (const t of tiles(width, height)) {
+    const g = tileCanvas(t.w, t.h);
+    g.translate(-t.x, -t.y);
+    draw(g);
+    writeRegion(p, g.getImageData(0, 0, t.w, t.h), t.x, t.y);
+  }
+  return p;
+}
+
 export function canvasToPixels(c: HTMLCanvasElement): Pixels {
   const g = c.getContext('2d')!;
   const p = blankPixels(c.width, c.height);
